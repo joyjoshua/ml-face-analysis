@@ -4,6 +4,11 @@ import insightface
 from insightface.app import FaceAnalysis
 import os
 import glob
+import requests
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # --- CONFIGURATION ---
 # "refer images in faces_to_search directory" -> These are the Reference faces (The people you want to find)
@@ -14,6 +19,7 @@ SEARCH_IN_DIR = os.path.join(os.getcwd(), "target_ref_imgs")
 
 OUTPUT_DIR = os.path.join(os.getcwd(), "processed_results")
 THRESHOLD = 0.5
+MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_API")
 
 class FaceSearchAgent:
     def __init__(self):
@@ -24,6 +30,9 @@ class FaceSearchAgent:
         self.app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
         self.app.prepare(ctx_id=0, det_size=(640, 640))
         self.known_faces = [] # List of {'name': str, 'embedding': np.array}
+        
+        if not MAKE_WEBHOOK_URL:
+            print("Warning: MAKE_WEBHOOK_URL not found in .env file. Images won't be uploaded.")
 
     def load_references(self, reference_dir):
         """Generates the 'fingerprint' for the reference persons found in the directory."""
@@ -74,6 +83,45 @@ class FaceSearchAgent:
             
         print(f"Total reference faces loaded: {len(self.known_faces)}")
 
+    def notify_make(self, file_paths):
+        """Uploads the processed images to Make.com as a bundle"""
+        if not MAKE_WEBHOOK_URL:
+            return
+        
+        if not file_paths:
+            print("No matches to upload.")
+            return
+
+        print(f"Uploading {len(file_paths)} images to Make.com...", end="\r")
+        
+        # Prepare valid file paths
+        files = []
+        opened_files = [] # Keep track of opened files to close them later
+        
+        try:
+            for path in file_paths:
+                f = open(path, 'rb')
+                opened_files.append(f)
+                filename = os.path.basename(path)
+                # Key can be 'files' to send as a list, or unique keys. 
+                # Sending as 'files' is standard for lists.
+                files.append(('files', (filename, f, 'image/jpeg')))
+            
+            data = {'status': 'completed', 'count': len(file_paths)}
+            
+            response = requests.post(MAKE_WEBHOOK_URL, files=files, data=data)
+            if response.status_code == 200:
+                print(f"[OK] Uploaded bundle of {len(file_paths)} images to Make.com")
+            else:
+                print(f"[Error] Make.com upload failed: {response.text}")
+                
+        except Exception as e:
+            print(f"[Error] Upload connection failed: {e}")
+        finally:
+            # Close all opened files
+            for f in opened_files:
+                f.close()
+
     def process_directory(self, search_dir, output_dir):
         """Iterates through all images in search_dir and finds matches."""
         print(f"\nScanning images in: {search_dir}")
@@ -93,6 +141,9 @@ class FaceSearchAgent:
 
         matches_count = 0
         processed_count = 0
+
+        # List to store paths of matched images for batch upload
+        matched_images = []
 
         for filepath in files:
             filename = os.path.basename(filepath)
@@ -148,8 +199,15 @@ class FaceSearchAgent:
                 output_path = os.path.join(output_dir, f"checked_{filename}")
                 cv2.imwrite(output_path, draw_img)
                 matches_count += 1
+                
+                # Add to batch list
+                matched_images.append(output_path)
             
             processed_count += 1
+        
+        # After processing all images, send the bundle
+        if matched_images:
+            self.notify_make(matched_images)
         
         print(f"\n\n--- Summary ---")
         print(f"Processed: {processed_count} images")
